@@ -1,9 +1,5 @@
 #!/usr/bin/python
 
-## Extracting data for the Southern Ocean - MICE model from DKRZ server
-## Date: 2023-11-07
-## Author: Denisse Fierro Arcos
-
 #Libraries
 import numpy as np
 import xarray as xr
@@ -33,7 +29,7 @@ mask_025deg = xr.open_dataset('Southern_Ocean_mask_025deg.nc').region
 mask_025deg = mask_025deg.rename({'latitude': 'lat', 'longitude': 'lon'}).sel(lat = slice(-30, -90))
 
 #Variables of interest
-var_list = ['thetao', 'chl', 'siconc', 'zmeso_']
+var_list = ['thetao', 'chl', 'siconc', 'zmeso_', 'phyc_', 'zooc_', 'phypico_', 'phydiaz_', 'phydiat_']
 
 ###### Defining useful functions ######
 
@@ -87,7 +83,7 @@ def load_ds_noncf(fn):
 
 
 ## Extracting surface data
-def masking_data(ds, var_int, mask):
+def masking_data(ds, var_int, mask, integrated = False):
   #Extracting only variable of interest and subset data to only include Southern Ocean
   try:
     ds = ds[var_int].sel(lat = slice(-30, -90))
@@ -101,50 +97,84 @@ def masking_data(ds, var_int, mask):
       var_ds = var_ds[0]
     ds = ds[var_ds].sel(lat = slice(-30, -90))
 
+  #Save attributes
+  ds_attrs = ds.attrs  
+
   #Applying mask
   ds.coords['mask'] = (('lat', 'lon'), mask.values)
   
-  #Checking if dataset has depth levels
-  #If so, add depth dimension to 51.25 depth bin
-  if 'lev' in ds.coords:
-    ds = ds.sel(lev = slice(0, 52)).mean('lev')
-  elif 'olevel' in ds.coords:
-    ds = ds.sel(olevel = slice(0, 52)).mean('olevel')
-  elif 'olevel_2' in ds.coords:
-    ds = ds.isel(olevel_2 = slice(0, 52)).mean('olevel_2')
+  #If variable is not integrated, check if depth dimension is present
+  if integrated == False:
+    #Calculate mean across depth dimension to 51.25 depth bin
+    if 'lev' in ds.coords:
+      ds = ds.sel(lev = slice(0, 52)).mean('lev')
+    elif 'olevel' in ds.coords:
+      ds = ds.sel(olevel = slice(0, 52)).mean('olevel')
+    elif 'olevel_2' in ds.coords:
+      ds = ds.isel(olevel_2 = slice(0, 52)).mean('olevel_2')
+  #If variable is integrated, check if depth dimension is present
+  else:
+    #Add values across depth dimension to 51.25 depth bin
+    if 'lev' in ds.coords:
+      ds = ds.sel(lev = slice(0, 52)).sum('lev')
+    elif 'olevel' in ds.coords:
+      ds = ds.sel(olevel = slice(0, 52)).sum('olevel')
+    elif 'olevel_2' in ds.coords:
+      ds = ds.isel(olevel_2 = slice(0, 52)).sum('olevel_2')
+
+  #Add attributes back to dataset
+  if len(ds.attrs) == 0:
+    ds.attrs = ds_attrs
   
+  #Return masked dataset
   return ds
 
-#Calculating seasonal means
-def seasonal_means(ds, path_out):
+
+#Calculating seasonal values
+def seasonal_summaries(ds, path_out, integrated = False):
   #Creating empty list to store seasonal means
-  seasonal_means = []
+  seasonal_summaries = []
   #Getting years in dataset
   years_ds = np.unique(ds.time.dt.year)
+
+  #Get units of dataset
+  units = ds.attrs['units']
+  #If kg*m-3, transform to g*m-3
+  if units == 'kg m-3':
+    ds = ds*1000
+  #If mol*m-3, transform to g*m-3
+  if units == 'mol m-3':
+    ds = ds*12.0107
   
   #Winter
   for yr, da in ds.groupby('time.year'):
-    #Calculating seasonal mean
-    winter = da.sel(time = slice(f'{yr}-05-01', f'{yr}-10-31')).groupby('mask').mean().mean('time')
+    if integrated == False:
+      #Calculating seasonal mean
+      winter = da.sel(time = slice(f'{yr}-05-01', f'{yr}-10-31')).groupby('mask').mean().mean('time')
+    else:
+      #Calculating seasonal sum
+      winter = da.sel(time = slice(f'{yr}-05-01', f'{yr}-10-31')).groupby('mask').sum().sum('time')
     winter = winter.expand_dims({'time':[f'winter_{yr}']})
-    seasonal_means.append(winter)
+    seasonal_summaries.append(winter)
   
   #Summer
   #Looping through each year
   for yr in years_ds:
-    #Extracting data for each year
-    summer = ds.sel(time = slice(f'{yr}-11-01', f'{yr+1}-04-30')).groupby('mask').mean().mean('time')
+    if integrated == False:
+      #Calculate mean values
+      summer = ds.sel(time = slice(f'{yr}-11-01', f'{yr+1}-04-30')).groupby('mask').mean().mean('time')
+    else:
+      #Calculate sum of values
+      summer = ds.sel(time = slice(f'{yr}-11-01', f'{yr+1}-04-30')).groupby('mask').sum().sum('time')
     summer = summer.expand_dims({'time':[f'summer_{yr}']})
-    seasonal_means.append(summer)
+    seasonal_summaries.append(summer)
 
   #Concatenating data back together
-  seasonal_means = xr.concat(seasonal_means, dim = 'time')
-  
+  seasonal_summaries = xr.concat(seasonal_summaries, dim = 'time')
   #Saving csv
-  seasonal_means.to_pandas().to_csv(path_out, na_rep = np.nan)
+  seasonal_summaries.to_pandas().to_csv(path_out, na_rep = np.nan)
   
-
-###### Applying functions to all files in directories of interest ######
+#### Applying functions to all files in directories of interest
 ###Loop through each directory
 for base in base_dir:
   #Find netcdf files for expriments and models of interest
@@ -181,9 +211,15 @@ for base in base_dir:
         if '15arcmin' in dp:
           mask = mask_025deg
         #Masking data 
-        masked_ds = masking_data(ds, var_int, mask)
-        #Calculating seasonal means
-        seasonal_means(masked_ds, path_out)
+        if var_int not in ['thetao', 'siconc']:
+          masked_ds = masking_data(ds, var_int, mask, integrated = True)
+        else:
+          masked_ds = masking_data(ds, var_int, mask, integrated = False)
+        #Calculating seasonal summaries
+        if var_int not in ['thetao', 'siconc']:
+          seasonal_summaries(masked_ds, path_out, integrated = True)
+        else:
+          seasonal_summaries(masked_ds, path_out, integrated = False)
       except:
         print(f'File could not be processed: {f}')
         pass

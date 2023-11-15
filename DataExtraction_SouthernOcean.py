@@ -1,5 +1,9 @@
 #!/usr/bin/python
 
+## Extracting data for the Southern Ocean - MICE model from DKRZ server
+## Date: 2023-11-15
+## Author: Denisse Fierro Arcos
+
 #Libraries
 import numpy as np
 import xarray as xr
